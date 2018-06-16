@@ -6,7 +6,9 @@ export GOOGLE_APPLICATION_CREDENTIALS='/home/elliottalexander/.gconf/Transcripti
 # The Audio File
 FILE='gs://escottalexander/output.flac'
 
-json="$(curl -X POST \
+filesize=$(echo $(gsutil du $FILE)| cut -d " " -f 1)
+
+json="$(curl --silent -X POST \
      -H "Authorization: Bearer "$(gcloud auth application-default print-access-token) \
      -H "Content-Type: application/json; charset=utf-8" \
      --data "{
@@ -14,7 +16,7 @@ json="$(curl -X POST \
     'encoding': 'FLAC',
     'sampleRateHertz': '16000',
     'languageCode': 'en-US',
-    "enableAutomaticPunctuation": true
+    'enableAutomaticPunctuation': true
       },
   'audio':{
     'uri':'$FILE'
@@ -22,31 +24,38 @@ json="$(curl -X POST \
 }" "https://speech.googleapis.com/v1/speech:longrunningrecognize"
 )"
 
-echo $json
-
 cat <<EOF > file.json
 $json
 EOF
 
 OPCODE=$(echo $(jq '.name' file.json) | tr -d '"') 
-echo "Loading system response for operation $OPCODE"
+echo "Loading system response for operation #$OPCODE"
+echo "Waiting for progress percentage"
 
-#TODO: revise load time to be based on file size
-#output.flac takes 12min - it is 40 minutes
-#better yet, find way to query periodically until file is complete (if .done = true)
+loadtime=$(($filesize / 65000))
+if [ $loadtime -lt 30 ]
+then
+loadtime=30
+fi
 
-count=0
-total=46
-pstr="[=======================================================================]"
+if [ $loadtime -gt 300 ]
+then
+  longload=true
+else
+  longload=false
+fi  
 
-while [ $count -lt $total ]; do
-  sleep 0.5 # this is work
-  count=$(( $count + 1 ))
-  pd=$(( $count * 73 / $total ))
-  printf "\r%3d.%1d%% %.${pd}s" $(( $count * 100 / $total )) $(( ($count * 1000 / $total) % 10 )) $pstr
-done
+isdone=$(jq '.done' file.json)
 
-response=$(curl -H "Authorization: Bearer "$(gcloud auth application-default print-access-token) \
+while [ "$isdone" = null ]
+do
+if [ $longload ]
+then
+  sleep $((loadtime/15))
+else
+  sleep $((loadtime/6))
+fi  
+response=$(curl --silent -H "Authorization: Bearer "$(gcloud auth application-default print-access-token) \
      -H "Content-Type: application/json; charset=utf-8" \
      "https://speech.googleapis.com/v1/operations/$OPCODE")
 
@@ -54,22 +63,26 @@ cat <<EOF > file.json
 $response
 EOF
 
+if [ $(jq '.metadata.progressPercent' file.json) != null ]
+then
+echo -e "\e[1A $(jq '.metadata.progressPercent' file.json)% Complete                                "
+isdone=$(jq '.done' file.json)
+fi
+done
+
 total=$(jq '.response.results | length' file.json)
 count=0
 DATE=$(date +%d-%m-%Y" "%H:%M:%S)
-
 echo 'TRANSCRIPT TIMESTAMP: '$DATE'' >> fulltranscript.txt
-while [ $count -lt $total ]; do
+while [ "$count" -lt "$total" ]; do
   echo $(jq '.response.results['$count'].alternatives[0].transcript' file.json) | tr -d '"' >> fulltranscript.txt
   count=$(( $count + 1 ))
 done
 echo 'END OF TRANSCRIPT' >> fulltranscript.txt
 
+# For testing purposes
 #'gs://cloud-samples-tests/speech/brooklyn.flac'
 
-response=$(curl -H "Authorization: Bearer "$(gcloud auth application-default print-access-token) \
-     -H "Content-Type: application/json; charset=utf-8" \
-     "https://speech.googleapis.com/v1/operations/7281258692467443201")
 
 
 
